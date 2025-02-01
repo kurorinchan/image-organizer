@@ -1774,7 +1774,7 @@ dependencies = [
  "color_quant",
  "exr",
  "gif",
- "image-webp 0.2.1",
+ "image-webp",
  "num-traits",
  "png",
  "qoi",
@@ -1794,18 +1794,8 @@ dependencies = [
  "egui",
  "egui_extras",
  "image",
- "image-webp 0.1.3",
+ "image-webp",
  "rfd",
-]
-
-[[package]]
-name = "image-webp"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f79afb8cbee2ef20f59ccd477a218c12a93943d075b492015ecb1bb81f8ee904"
-dependencies = [
- "byteorder-lite",
- "quick-error",
 ]
 
 [[package]]
