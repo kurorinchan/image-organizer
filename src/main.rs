@@ -325,9 +325,10 @@ impl eframe::App for MyApp {
 
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
-    let mut native_options = eframe::NativeOptions::default();
-    native_options.viewport =
-        egui::ViewportBuilder::default().with_inner_size(egui::Vec2::new(1280.0, 960.0));
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size(egui::Vec2::new(1280.0, 960.0)),
+        ..Default::default()
+    };
 
     let noto_sans_font = FontAsset::get("NotoSansJP-VariableFont_wght.ttf").unwrap();
 
