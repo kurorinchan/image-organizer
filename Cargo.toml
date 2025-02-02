@@ -10,3 +10,9 @@ image = "0.25.5"
 rfd = "0.15.2"
 image-webp = "0.2"
 egui_extras = { version = "0.30.0", features = ["all_loaders"] }
+env_logger = "0.11.6"
+log = "0.4.25"
+anyhow = "1.0.95"
+
+[dev-dependencies]
+tempfile = "3.16.0"

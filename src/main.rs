@@ -1,7 +1,10 @@
 use eframe::egui;
 use rfd::FileDialog;
-use std::fs;
+use std::{fs, path::Path, path::PathBuf};
 
+use anyhow::{bail, Result};
+
+#[derive(Clone, Debug)]
 struct FolderLetterEntry {
     folder: String,
     letter: char,
@@ -31,6 +34,9 @@ fn get_image_paths(folder_path: &str) -> Vec<String> {
             };
 
             let ext_lower = ext_str.to_lowercase();
+            // TODO: There is also image::ImageFormat.all() and then call can_read() to see if
+            // the current features allow reading the file. Then use extension_str() to get
+            // all the extensions for that image format.
             let image_extensions = ["jpg", "jpeg", "png", "gif", "webp"];
             if image_extensions.contains(&ext_lower.as_str()) {
                 // Add more extensions as needed
@@ -43,18 +49,79 @@ fn get_image_paths(folder_path: &str) -> Vec<String> {
     image_paths
 }
 
+fn move_file(src: &str, dest_dir: &str) -> std::io::Result<()> {
+    let src_path = Path::new(src);
+    let filename = src_path.file_name().unwrap();
+    let dest_path = PathBuf::from(dest_dir).join(filename);
+    std::fs::rename(src, dest_path)
+}
+
+impl MyApp {
+    fn move_current_image_to_dest(&mut self, dest_dir: &str) -> Result<()> {
+        let Some(image_path) = self.image_paths.get(self.current_image_index) else {
+            bail!(
+                "No image path found at the current index {}.",
+                self.current_image_index
+            );
+        };
+
+        match move_file(image_path, dest_dir) {
+            Ok(_) => {
+                log::info!("Moved file {} to {}", image_path, dest_dir);
+                self.image_paths.remove(self.current_image_index);
+                // Handle the case where the current_image_index is
+                // now out of bounds because it (re)moved the last
+                // file.
+                if self.current_image_index >= self.image_paths.len()
+                    && self.current_image_index > 0
+                {
+                    self.current_image_index = self.image_paths.len() - 1;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to move file: {}", e);
+                Err(e.into())
+            }
+        }
+    }
+}
+
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.input(|i| {
+        ctx.input(|input| {
             if self.image_paths.is_empty() {
                 return;
             }
-            if i.key_pressed(egui::Key::J) {
+            if input.key_pressed(egui::Key::J) {
                 self.current_image_index = (self.current_image_index + 1) % self.image_paths.len();
             }
-            if i.key_pressed(egui::Key::K) {
+            if input.key_pressed(egui::Key::K) {
                 self.current_image_index =
                     self.current_image_index.wrapping_sub(1) % self.image_paths.len();
+            }
+
+            // If registered letter is pressed, move the file to the folder.
+            for entry in self.folder_letter_entries.clone().iter() {
+                let letter = entry.letter;
+                let Some(key) = egui::Key::from_name(&letter.to_string()) else {
+                    // TODO: This probably spams the log. Do it on register.
+                    log::error!("Invalid folder letter: {}", letter);
+                    continue;
+                };
+                if !input.key_pressed(key) {
+                    continue;
+                }
+
+                let dest_dir = &entry.folder;
+                match self.move_current_image_to_dest(dest_dir) {
+                    Ok(_) => {
+                        log::info!("Moved file to {}", dest_dir);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to move file: {}", e);
+                    }
+                };
             }
         });
 
@@ -149,6 +216,7 @@ impl eframe::App for MyApp {
 }
 
 fn main() -> Result<(), eframe::Error> {
+    env_logger::init();
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "Image organizer",
@@ -158,4 +226,90 @@ fn main() -> Result<(), eframe::Error> {
             Ok(Box::new(MyApp::default()))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Move a temporary file from one folder to another.
+    #[test]
+    fn move_file_test() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let src_path = temp_dir.path().join("test.txt");
+        let dest_dir = temp_dir.path().join("test_dest");
+        fs::create_dir(&dest_dir).unwrap();
+        std::fs::write(&src_path, b"Hello, world!").unwrap();
+        assert!(src_path.exists());
+        move_file(&src_path.to_string_lossy(), &dest_dir.to_string_lossy()).unwrap();
+        assert!(!src_path.exists());
+        assert!(dest_dir.join("test.txt").exists());
+    }
+
+    #[test]
+    fn move_current_image_to_dest_test() {
+        let mut app = MyApp::default();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let src_path = temp_dir.path().join("test.txt");
+        let dest_dir = temp_dir.path().join("test_dest");
+        fs::create_dir(&dest_dir).unwrap();
+        std::fs::write(&src_path, b"Hello, world!").unwrap();
+        app.image_paths = vec![src_path.to_string_lossy().to_string()];
+        app.current_image_index = 0;
+        app.move_current_image_to_dest(&dest_dir.to_string_lossy())
+            .unwrap();
+        assert!(!src_path.exists());
+        assert!(dest_dir.join("test.txt").exists());
+    }
+
+    // Given there are mulitple files in the src folder, move the current image to the dest folder.
+    #[test]
+    fn multiple_one_file_move_current_image_to_dest_test() {
+        let mut app = MyApp::default();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let src_path1 = temp_dir.path().join("test1.txt");
+        let src_path2 = temp_dir.path().join("test2.txt");
+        let dest_dir = temp_dir.path().join("test_dest");
+        fs::create_dir(&dest_dir).unwrap();
+        std::fs::write(&src_path1, b"Hello, world!").unwrap();
+        std::fs::write(&src_path2, b"Hello, world!").unwrap();
+        app.image_paths = vec![
+            src_path1.to_string_lossy().to_string(),
+            src_path2.to_string_lossy().to_string(),
+        ];
+
+        // Move the file at the first index. Make sure the second file is not affected.
+        app.current_image_index = 0;
+        app.move_current_image_to_dest(&dest_dir.to_string_lossy())
+            .unwrap();
+        assert!(!src_path1.exists());
+        assert!(src_path2.exists());
+        assert!(dest_dir.join("test1.txt").exists());
+        assert!(!dest_dir.join("test2.txt").exists());
+    }
+
+    #[test]
+    fn move_all_files_move_current_image_to_dest_test() {
+        let mut app = MyApp::default();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let src_path1 = temp_dir.path().join("test1.txt");
+        let src_path2 = temp_dir.path().join("test2.txt");
+        let dest_dir = temp_dir.path().join("test_dest");
+        fs::create_dir(&dest_dir).unwrap();
+        std::fs::write(&src_path1, b"Hello, world!").unwrap();
+        std::fs::write(&src_path2, b"Hello, world!").unwrap();
+        app.image_paths = vec![
+            src_path1.to_string_lossy().to_string(),
+            src_path2.to_string_lossy().to_string(),
+        ];
+        app.current_image_index = 0;
+        app.move_current_image_to_dest(&dest_dir.to_string_lossy())
+            .unwrap();
+        app.move_current_image_to_dest(&dest_dir.to_string_lossy())
+            .unwrap();
+        assert!(!src_path1.exists());
+        assert!(!src_path2.exists());
+        assert!(dest_dir.join("test1.txt").exists());
+        assert!(dest_dir.join("test2.txt").exists());
+    }
 }
