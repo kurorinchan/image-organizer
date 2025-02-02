@@ -1,4 +1,5 @@
 use eframe::egui;
+use egui::{FontData, FontDefinitions, FontFamily};
 use rfd::FileDialog;
 use std::{fs, path::Path, path::PathBuf};
 
@@ -85,6 +86,15 @@ impl MyApp {
             }
         }
     }
+
+    fn next_image(&mut self) {
+        self.current_image_index = (self.current_image_index + 1) % self.image_paths.len();
+    }
+
+    fn previous_image(&mut self) {
+        self.current_image_index =
+            self.current_image_index.wrapping_sub(1) % self.image_paths.len();
+    }
 }
 
 impl eframe::App for MyApp {
@@ -94,11 +104,10 @@ impl eframe::App for MyApp {
                 return;
             }
             if input.key_pressed(egui::Key::J) {
-                self.current_image_index = (self.current_image_index + 1) % self.image_paths.len();
+                self.next_image();
             }
             if input.key_pressed(egui::Key::K) {
-                self.current_image_index =
-                    self.current_image_index.wrapping_sub(1) % self.image_paths.len();
+                self.previous_image();
             }
 
             // If registered letter is pressed, move the file to the folder.
@@ -136,11 +145,13 @@ impl eframe::App for MyApp {
                     }
                 }
 
-                ui.label("Selected Folder:");
-                match &self.selected_folder {
-                    Some(folder) => ui.label(folder),
-                    None => ui.label("No folder selected."),
-                };
+                ui.horizontal(|ui| {
+                    ui.label("Selected Folder:");
+                    match &self.selected_folder {
+                        Some(folder) => ui.label(folder),
+                        None => ui.label("No folder selected."),
+                    };
+                });
 
                 let available_height = ui.available_size().y;
                 // Limit upper part to 70%.
@@ -152,7 +163,8 @@ impl eframe::App for MyApp {
 
                 // Display the current image:
                 if let Some(path) = self.image_paths.get(self.current_image_index) {
-                    ui.label(format!("Current Image: {}", path));
+                    let filename = Path::new(path).file_name().unwrap();
+                    ui.label(format!("Current Image: {}", filename.to_string_lossy()));
                     let path = format!("file://{}", path);
                     ui.add(
                         egui::Image::new(egui::ImageSource::Uri(std::borrow::Cow::from(path)))
@@ -218,10 +230,21 @@ impl eframe::App for MyApp {
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
     let native_options = eframe::NativeOptions::default();
+    let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert(
+        "my_font".to_owned(),
+        FontData::from_static(include_bytes!("../fonts/NotoSansJP-VariableFont_wght.ttf")).into(),
+    );
+    fonts
+        .families
+        .get_mut(&FontFamily::Proportional)
+        .unwrap()
+        .insert(0, "my_font".to_owned());
     eframe::run_native(
         "Image organizer",
         native_options,
         Box::new(|cc| {
+            cc.egui_ctx.set_fonts(fonts);
             egui_extras::install_image_loaders(&cc.egui_ctx);
             Ok(Box::new(MyApp::default()))
         }),
