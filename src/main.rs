@@ -347,8 +347,6 @@ fn main() -> Result<(), eframe::Error> {
 
 #[cfg(test)]
 mod tests {
-    use egui::TextBuffer;
-
     use super::*;
 
     // Move a temporary file from one folder to another.
