@@ -11,6 +11,14 @@ struct FolderLetterEntry {
     letter: char,
 }
 
+#[derive(Clone, Debug, Default)]
+struct MoveLogEntry {
+    // Original source file path.
+    src: String,
+    // Where the file was moved.
+    dest: String,
+}
+
 #[derive(Default)]
 struct MyApp {
     selected_folder: Option<String>,
@@ -19,6 +27,7 @@ struct MyApp {
     folder_letter_entries: Vec<FolderLetterEntry>,
     new_folder: String,
     new_letter: String,
+    move_log: Vec<MoveLogEntry>,
 }
 
 fn get_image_paths(folder_path: &str) -> Vec<String> {
@@ -47,14 +56,21 @@ fn get_image_paths(folder_path: &str) -> Vec<String> {
             }
         }
     }
+
+    // It's likely that screenshot names are named by date it was taken. Sorting
+    // and reversing it would show the latest images first.
+    image_paths.sort();
+    image_paths.reverse();
     image_paths
 }
 
-fn move_file(src: &str, dest_dir: &str) -> std::io::Result<()> {
+// Moves src to dest_dir. Returns the new file path on success.
+fn move_file(src: &str, dest_dir: &str) -> std::io::Result<String> {
     let src_path = Path::new(src);
     let filename = src_path.file_name().unwrap();
     let dest_path = PathBuf::from(dest_dir).join(filename);
-    std::fs::rename(src, dest_path)
+    std::fs::rename(src, &dest_path)?;
+    Ok(dest_path.to_string_lossy().to_string())
 }
 
 impl MyApp {
@@ -66,18 +82,22 @@ impl MyApp {
             );
         };
 
-        match move_file(image_path, dest_dir) {
-            Ok(_) => {
+        let image_path = image_path.clone();
+        match move_file(&image_path, dest_dir) {
+            Ok(new_path) => {
                 log::info!("Moved file {} to {}", image_path, dest_dir);
                 self.image_paths.remove(self.current_image_index);
-                // Handle the case where the current_image_index is
-                // now out of bounds because it (re)moved the last
-                // file.
+                // Handle the case where the current_image_index is now out of
+                // bounds because it (re)moved the last file.
                 if self.current_image_index >= self.image_paths.len()
                     && self.current_image_index > 0
                 {
                     self.current_image_index = self.image_paths.len() - 1;
                 }
+                self.move_log.push(MoveLogEntry {
+                    src: image_path.clone(),
+                    dest: new_path,
+                });
                 Ok(())
             }
             Err(e) => {
@@ -95,10 +115,35 @@ impl MyApp {
         self.current_image_index =
             self.current_image_index.wrapping_sub(1) % self.image_paths.len();
     }
+
+    fn remove_folder_letter_entries(&mut self, indecies: Vec<usize>) {
+        let mut indecies = indecies;
+        indecies.sort();
+        indecies.reverse();
+        for index in indecies {
+            self.folder_letter_entries.remove(index);
+        }
+    }
+
+    // Undo the last move. The image is reinserted to the current index.
+    // Returns the path to the un-done file.
+    fn undo_move(&mut self) -> Option<String> {
+        if self.move_log.is_empty() {
+            return None;
+        }
+        let last_move = self.move_log.pop().unwrap();
+        let src = last_move.src;
+        let dest = last_move.dest;
+        std::fs::rename(&dest, &src).ok()?;
+        self.image_paths
+            .insert(self.current_image_index, src.clone());
+        Some(src)
+    }
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut status_message = String::new();
         ctx.input(|input| {
             if self.image_paths.is_empty() {
                 return;
@@ -108,6 +153,11 @@ impl eframe::App for MyApp {
             }
             if input.key_pressed(egui::Key::K) {
                 self.previous_image();
+            }
+
+            if input.modifiers.ctrl && input.key_pressed(egui::Key::Z) {
+                self.undo_move();
+                status_message = "Undo".to_string();
             }
 
             // If registered letter is pressed, move the file to the folder.
@@ -125,10 +175,12 @@ impl eframe::App for MyApp {
                 let dest_dir = &entry.folder;
                 match self.move_current_image_to_dest(dest_dir) {
                     Ok(_) => {
-                        log::info!("Moved file to {}", dest_dir);
+                        status_message = format!("Moved file to {}", dest_dir);
+                        log::info!("{}", &status_message);
                     }
                     Err(e) => {
-                        log::error!("Failed to move file: {}", e);
+                        status_message = format!("Failed to move file: {}", e);
+                        log::error!("{}", &status_message);
                     }
                 };
             }
@@ -136,21 +188,26 @@ impl eframe::App for MyApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical(|ui| {
-                if ui.button("Choose Folder").clicked() {
-                    if let Some(path) = FileDialog::new().pick_folder() {
-                        self.selected_folder = Some(path.to_string_lossy().to_string());
-                        if let Some(folder) = &self.selected_folder {
-                            self.image_paths = get_image_paths(folder); // Update image paths
+                ui.horizontal(|ui| {
+                    if ui.button("Choose Folder").clicked() {
+                        if let Some(path) = FileDialog::new().pick_folder() {
+                            self.selected_folder = Some(path.to_string_lossy().to_string());
+                            if let Some(folder) = &self.selected_folder {
+                                self.image_paths = get_image_paths(folder); // Update image paths
+                            }
                         }
                     }
-                }
-
-                ui.horizontal(|ui| {
                     ui.label("Selected Folder:");
                     match &self.selected_folder {
                         Some(folder) => ui.label(folder),
                         None => ui.label("No folder selected."),
                     };
+                    ui.label(format!("({})", self.image_paths.len()));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Status:");
+                    ui.label(status_message);
                 });
 
                 let available_height = ui.available_size().y;
@@ -193,33 +250,43 @@ impl eframe::App for MyApp {
                                     // Button to open file dialog
                                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
                                         self.new_folder = path.to_string_lossy().to_string();
-                                        // Update the new_folder string
                                     }
                                 }
                                 ui.text_edit_singleline(&mut self.new_folder); // Display the chosen path
 
                                 ui.label("Letter:");
                                 ui.text_edit_singleline(&mut self.new_letter);
-
-                                if ui.button("+").clicked() && !self.new_folder.is_empty() {
-                                    if let Some(letter) = self.new_letter.chars().next() {
-                                        self.folder_letter_entries.push(FolderLetterEntry {
-                                            folder: self.new_folder.clone(),
-                                            letter,
-                                        });
-                                        self.new_folder.clear();
-                                        self.new_letter.clear();
-                                    }
-                                }
                             });
 
-                            // Display Folder & Letter Entries:
-                            for entry in &self.folder_letter_entries {
-                                ui.label(format!(
-                                    "Folder: {}, Letter: {}",
-                                    entry.folder, entry.letter
-                                ));
+                            if ui.button("+").clicked()
+                                && !self.new_folder.is_empty()
+                                && !self.new_letter.is_empty()
+                            {
+                                if let Some(letter) = self.new_letter.chars().next() {
+                                    self.folder_letter_entries.push(FolderLetterEntry {
+                                        folder: self.new_folder.clone(),
+                                        letter,
+                                    });
+                                    self.new_folder.clear();
+                                    self.new_letter.clear();
+                                }
                             }
+
+                            let mut remove_index = vec![];
+                            // Display Folder & Letter Entries:
+                            for (index, entry) in self.folder_letter_entries.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!(
+                                        "Folder: {}, Letter: {}",
+                                        entry.folder, entry.letter
+                                    ));
+                                    if ui.button("X").clicked() {
+                                        remove_index.push(index);
+                                    }
+                                });
+                            }
+
+                            self.remove_folder_letter_entries(remove_index);
                         });
                 });
             })
@@ -253,6 +320,8 @@ fn main() -> Result<(), eframe::Error> {
 
 #[cfg(test)]
 mod tests {
+    use egui::TextBuffer;
+
     use super::*;
 
     // Move a temporary file from one folder to another.
@@ -334,5 +403,62 @@ mod tests {
         assert!(!src_path2.exists());
         assert!(dest_dir.join("test1.txt").exists());
         assert!(dest_dir.join("test2.txt").exists());
+    }
+
+    #[test]
+    fn remove_folder_letter_entries_test() {
+        let mut app = MyApp {
+            folder_letter_entries: vec![
+                FolderLetterEntry {
+                    folder: "folder1".to_string(),
+                    letter: 'A',
+                },
+                FolderLetterEntry {
+                    folder: "folder2".to_string(),
+                    letter: 'B',
+                },
+            ],
+            ..Default::default()
+        };
+        let indecies = vec![0, 1];
+        app.remove_folder_letter_entries(indecies);
+        assert!(app.folder_letter_entries.is_empty());
+    }
+
+    #[test]
+    fn undo_move_test() {
+        let mut app = MyApp::default();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let src_path = temp_dir.path().join("test.txt");
+        let dest_dir = temp_dir.path().join("test_dest");
+        fs::create_dir(&dest_dir).unwrap();
+
+        std::fs::write(&src_path, b"Hello, world!").unwrap();
+        app.image_paths = vec![src_path.to_string_lossy().to_string()];
+        app.current_image_index = 0;
+        app.move_current_image_to_dest(&dest_dir.to_string_lossy())
+            .unwrap();
+
+        // Make sure its not in image paths anymore and has been moved.
+        assert!(!app
+            .image_paths
+            .contains(&src_path.to_string_lossy().to_string()));
+        assert!(!src_path.exists());
+        assert!(dest_dir.join("test.txt").exists());
+
+        // Now undo and check that everything is rolled back.
+        let Some(undo_path) = app.undo_move() else {
+            panic!("undo_move() returned None");
+        };
+        assert_eq!(undo_path, src_path.to_string_lossy());
+        assert!(src_path.exists());
+        assert!(!dest_dir.join("test.txt").exists());
+        assert!(app
+            .image_paths
+            .contains(&src_path.to_string_lossy().to_string()));
+
+        // Further undo should return None.
+        assert!(app.undo_move().is_none());
+        assert!(app.undo_move().is_none());
     }
 }
