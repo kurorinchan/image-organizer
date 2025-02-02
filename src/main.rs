@@ -1,9 +1,14 @@
 use eframe::egui;
 use egui::{FontData, FontDefinitions, FontFamily};
 use rfd::FileDialog;
+use rust_embed::Embed;
 use std::{fs, path::Path, path::PathBuf};
 
 use anyhow::{bail, Result};
+
+#[derive(Embed)]
+#[folder = "fonts"]
+struct FontAsset;
 
 #[derive(Clone, Debug)]
 struct FolderLetterEntry {
@@ -324,10 +329,12 @@ fn main() -> Result<(), eframe::Error> {
     native_options.viewport =
         egui::ViewportBuilder::default().with_inner_size(egui::Vec2::new(1280.0, 960.0));
 
+    let noto_sans_font = FontAsset::get("NotoSansJP-VariableFont_wght.ttf").unwrap();
+
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(
         "my_font".to_owned(),
-        FontData::from_static(include_bytes!("../fonts/NotoSansJP-VariableFont_wght.ttf")).into(),
+        FontData::from_owned(noto_sans_font.data.to_vec()).into(),
     );
     fonts
         .families
