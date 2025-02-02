@@ -15,7 +15,7 @@ struct FolderLetterEntry {
 struct MoveLogEntry {
     // Original source file path.
     src: String,
-    // Where the file was moved.
+    // Where the file was moved. Full path (i.e. not just destination dir).
     dest: String,
 }
 
@@ -28,6 +28,7 @@ struct MyApp {
     new_folder: String,
     new_letter: String,
     move_log: Vec<MoveLogEntry>,
+    status_message: String,
 }
 
 fn get_image_paths(folder_path: &str) -> Vec<String> {
@@ -64,6 +65,11 @@ fn get_image_paths(folder_path: &str) -> Vec<String> {
     image_paths
 }
 
+fn get_file_name(path: &str) -> String {
+    let path = Path::new(path);
+    path.file_name().unwrap().to_string_lossy().to_string()
+}
+
 // Moves src to dest_dir. Returns the new file path on success.
 fn move_file(src: &str, dest_dir: &str) -> std::io::Result<String> {
     let src_path = Path::new(src);
@@ -74,7 +80,7 @@ fn move_file(src: &str, dest_dir: &str) -> std::io::Result<String> {
 }
 
 impl MyApp {
-    fn move_current_image_to_dest(&mut self, dest_dir: &str) -> Result<()> {
+    fn move_current_image_to_dest(&mut self, dest_dir: &str) -> Result<MoveLogEntry> {
         let Some(image_path) = self.image_paths.get(self.current_image_index) else {
             bail!(
                 "No image path found at the current index {}.",
@@ -94,11 +100,12 @@ impl MyApp {
                 {
                     self.current_image_index = self.image_paths.len() - 1;
                 }
-                self.move_log.push(MoveLogEntry {
+                let log_entry = MoveLogEntry {
                     src: image_path.clone(),
-                    dest: new_path,
-                });
-                Ok(())
+                    dest: new_path.clone(),
+                };
+                self.move_log.push(log_entry.clone());
+                Ok(log_entry)
             }
             Err(e) => {
                 log::error!("Failed to move file: {}", e);
@@ -112,8 +119,11 @@ impl MyApp {
     }
 
     fn previous_image(&mut self) {
-        self.current_image_index =
-            self.current_image_index.wrapping_sub(1) % self.image_paths.len();
+        if self.current_image_index == 0 {
+            self.current_image_index = self.image_paths.len() - 1;
+        } else {
+            self.current_image_index -= 1;
+        }
     }
 
     fn remove_folder_letter_entries(&mut self, indecies: Vec<usize>) {
@@ -145,9 +155,6 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut status_message = String::new();
         ctx.input(|input| {
-            if self.image_paths.is_empty() {
-                return;
-            }
             if input.key_pressed(egui::Key::J) {
                 self.next_image();
             }
@@ -156,8 +163,14 @@ impl eframe::App for MyApp {
             }
 
             if input.modifiers.ctrl && input.key_pressed(egui::Key::Z) {
-                self.undo_move();
-                status_message = "Undo".to_string();
+                match self.undo_move() {
+                    Some(_) => {
+                        status_message = "Undo".to_string();
+                    }
+                    None => {
+                        status_message = "Nothing to undo.".to_string();
+                    }
+                }
             }
 
             // If registered letter is pressed, move the file to the folder.
@@ -174,8 +187,9 @@ impl eframe::App for MyApp {
 
                 let dest_dir = &entry.folder;
                 match self.move_current_image_to_dest(dest_dir) {
-                    Ok(_) => {
-                        status_message = format!("Moved file to {}", dest_dir);
+                    Ok(move_log) => {
+                        let filename = get_file_name(&move_log.src);
+                        status_message = format!("Moved {} -> {}", filename, dest_dir);
                         log::info!("{}", &status_message);
                     }
                     Err(e) => {
@@ -189,7 +203,7 @@ impl eframe::App for MyApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("Choose Folder").clicked() {
+                    if ui.button("Choose Image Folder").clicked() {
                         if let Some(path) = FileDialog::new().pick_folder() {
                             self.selected_folder = Some(path.to_string_lossy().to_string());
                             if let Some(folder) = &self.selected_folder {
@@ -207,7 +221,12 @@ impl eframe::App for MyApp {
 
                 ui.horizontal(|ui| {
                     ui.label("Status:");
-                    ui.label(status_message);
+                    if !status_message.is_empty() {
+                        // The status message has to be copied because any update will set the
+                        // cleared status message.
+                        self.status_message = status_message;
+                    }
+                    ui.label(&self.status_message);
                 });
 
                 let available_height = ui.available_size().y;
@@ -220,8 +239,13 @@ impl eframe::App for MyApp {
 
                 // Display the current image:
                 if let Some(path) = self.image_paths.get(self.current_image_index) {
-                    let filename = Path::new(path).file_name().unwrap();
-                    ui.label(format!("Current Image: {}", filename.to_string_lossy()));
+                    let filename = get_file_name(path);
+                    let n_out_of_all = format!(
+                        "({}/{})",
+                        self.current_image_index + 1,
+                        self.image_paths.len()
+                    );
+                    ui.label(format!("Current Image: {} {}", n_out_of_all, filename));
                     let path = format!("file://{}", path);
                     ui.add(
                         egui::Image::new(egui::ImageSource::Uri(std::borrow::Cow::from(path)))
@@ -246,7 +270,7 @@ impl eframe::App for MyApp {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label("Folder:");
-                                if ui.button("Choose Folder").clicked() {
+                                if ui.button("Choose Destination Folder").clicked() {
                                     // Button to open file dialog
                                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
                                         self.new_folder = path.to_string_lossy().to_string();
@@ -296,7 +320,10 @@ impl eframe::App for MyApp {
 
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
-    let native_options = eframe::NativeOptions::default();
+    let mut native_options = eframe::NativeOptions::default();
+    native_options.viewport =
+        egui::ViewportBuilder::default().with_inner_size(egui::Vec2::new(1280.0, 960.0));
+
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(
         "my_font".to_owned(),
