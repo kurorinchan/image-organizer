@@ -1,10 +1,11 @@
 use eframe::egui;
-use egui::{FontData, FontDefinitions, FontFamily, Vec2};
+use egui::{FontData, FontDefinitions, FontFamily, SizeHint};
 use rfd::FileDialog;
 use rust_embed::Embed;
 use std::{
     collections::HashSet,
     fs,
+    hash::Hash,
     path::{Path, PathBuf},
 };
 
@@ -57,6 +58,10 @@ struct Loader {
     context: egui::Context,
 }
 
+// This struct does not provide a "remove" method as it makes it easy to unload images that
+// currently displayed.
+// `only_keep` is provided instead to handle memory management. Call it periodically to
+// clean up loaded images.
 impl Loader {
     /// Set the current context.
     fn set_context(&mut self, context: &egui::Context) {
@@ -64,7 +69,6 @@ impl Loader {
     }
 
     /// Add a new image to be loaded.
-    /// Actual loading happens when the image is added to the `ui` in `egui.`
     fn add(&mut self, path: &str) -> egui::Image {
         let image_path = ImagePath::new(path);
         if self.image_paths.insert(image_path.clone()) {
@@ -72,15 +76,26 @@ impl Loader {
                 "Added image. Number of Loaded images: {}",
                 self.image_paths.len()
             );
+            match self
+                .context
+                .try_load_image(&image_path.uri(), SizeHint::default())
+            {
+                Ok(_) => {
+                    log::info!("Loading image: {}", image_path.path());
+                }
+                Err(e) => {
+                    log::error!("Failed to load image: {}", e);
+                }
+            };
         }
         egui::Image::from_uri(image_path.uri())
     }
 
     /// Remove images from the loader except those specified in `paths`.
-    fn only_keep(&mut self, paths: Vec<String>) {
-        let new_set: HashSet<ImagePath> =
-            HashSet::from_iter(paths.iter().map(|p| ImagePath::new(p)));
-        let still_loaded = &self.image_paths - &new_set;
+    /// Images in `paths` are added to be loaded.
+    fn only_keep(&mut self, paths: HashSet<String>) {
+        let paths = paths.iter().map(|p| ImagePath::new(p)).collect();
+        let still_loaded = &self.image_paths - &paths;
         if still_loaded.is_empty() {
             return;
         }
@@ -88,6 +103,10 @@ impl Loader {
             log::debug!("OnlyKeep: Removing image: {}", path.path());
             self.image_paths.remove(&path);
             self.context.forget_image(&path.uri());
+        }
+        let new_paths = &paths - &self.image_paths;
+        for path in new_paths {
+            let _ = self.add(path.path());
         }
     }
 }
@@ -132,10 +151,9 @@ impl ImageManager {
             self.all_images.len(),
             self.current_image_index.saturating_add(3),
         );
-        let mut keep_images = Vec::new();
-        for i in start..end {
-            keep_images.push(self.all_images[i].to_string());
-        }
+        let keep_images: HashSet<String> = (start..end)
+            .map(|index| self.all_images[index].to_string())
+            .collect();
         self.loader.only_keep(keep_images);
     }
 
@@ -169,9 +187,8 @@ impl ImageManager {
             return None;
         }
         let path = self.all_images.remove(self.current_image_index);
-        //self.loader.remove(&path);
 
-        // Handle the case where the current_image_index is now out of bounds
+        // Handling the case where the current_image_index is now out of bounds
         // because it (re)moved the last file.
         if self.current_image_index >= self.all_images.len() && self.current_image_index > 0 {
             self.current_image_index = self.all_images.len() - 1;
@@ -186,10 +203,11 @@ impl ImageManager {
         Some(path)
     }
 
-    fn add_image(&mut self, path: &str) {
+    /// Add image to the current position.
+    fn add_image_to_current_position(&mut self, path: &str) {
         self.all_images
             .insert(self.current_image_index, path.to_string());
-        self.loader.add(path);
+        let _ = self.loader.add(path);
     }
 }
 
@@ -303,7 +321,7 @@ impl MyApp {
         let src = last_move.src;
         let dest = last_move.dest;
         std::fs::rename(&dest, &src).ok()?;
-        self.image_manager.add_image(&src);
+        self.image_manager.add_image_to_current_position(&src);
         Some(src)
     }
 }
