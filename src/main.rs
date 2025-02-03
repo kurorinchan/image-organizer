@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui::{FontData, FontDefinitions, FontFamily};
+use egui::{FontData, FontDefinitions, FontFamily, Vec2};
 use rfd::FileDialog;
 use rust_embed::Embed;
 use std::{
@@ -58,10 +58,13 @@ struct Loader {
 }
 
 impl Loader {
+    /// Set the current context.
     fn set_context(&mut self, context: &egui::Context) {
         self.context = context.clone();
     }
 
+    /// Add a new image to be loaded.
+    /// Actual loading happens when the image is added to the `ui` in `egui.`
     fn add(&mut self, path: &str) -> egui::Image {
         let image_path = ImagePath::new(path);
         if self.image_paths.insert(image_path.clone()) {
@@ -70,36 +73,21 @@ impl Loader {
                 self.image_paths.len()
             );
         }
-        egui::Image::new(egui::ImageSource::Uri(std::borrow::Cow::from(
-            image_path.uri(),
-        )))
+        egui::Image::from_uri(image_path.uri())
     }
 
-    fn remove(&mut self, path: &str) {
-        let path = ImagePath::new(path);
-        if self.image_paths.remove(&path) {
-            self.context.forget_image(&path.uri());
-        }
-        log::info!(
-            "Removed image. Number of Loaded images: {}",
-            self.image_paths.len()
-        );
-    }
-
+    /// Remove images from the loader except those specified in `paths`.
     fn only_keep(&mut self, paths: Vec<String>) {
         let new_set: HashSet<ImagePath> =
             HashSet::from_iter(paths.iter().map(|p| ImagePath::new(p)));
-        let left_over = &self.image_paths - &new_set;
-        if left_over.is_empty() {
+        let still_loaded = &self.image_paths - &new_set;
+        if still_loaded.is_empty() {
             return;
         }
-        for path in left_over {
+        for path in still_loaded {
             log::debug!("OnlyKeep: Removing image: {}", path.path());
-            self.remove(path.path());
-        }
-        for path in &new_set {
-            log::debug!("OnlyKeep: Adding image: {}", path.path());
-            self.add(path.path());
+            self.image_paths.remove(&path);
+            self.context.forget_image(&path.uri());
         }
     }
 }
@@ -127,8 +115,8 @@ impl ImageManager {
     }
 
     fn load_current_image(&mut self) -> Option<LoadedImageInfo> {
-        let path = &self.all_images.get(self.current_image_index);
-        match *path {
+        let path = self.all_images.get(self.current_image_index);
+        match path {
             Some(path) => Some(LoadedImageInfo {
                 path: path.clone(),
                 image: self.loader.add(path),
@@ -172,7 +160,7 @@ impl ImageManager {
     }
 
     fn remove_current_image(&mut self) -> Option<String> {
-        if self.all_images.len() <= self.current_image_index {
+        if self.current_image_index >= self.all_images.len() {
             log::error!(
                 "Current image index is {} but only has {}.",
                 self.current_image_index,
@@ -181,13 +169,19 @@ impl ImageManager {
             return None;
         }
         let path = self.all_images.remove(self.current_image_index);
-        self.loader.remove(&path);
+        //self.loader.remove(&path);
 
         // Handle the case where the current_image_index is now out of bounds
         // because it (re)moved the last file.
         if self.current_image_index >= self.all_images.len() && self.current_image_index > 0 {
             self.current_image_index = self.all_images.len() - 1;
         }
+
+        log::debug!(
+            "Removed image. Current index {}. Number of images: {}",
+            self.current_image_index,
+            self.all_images.len()
+        );
 
         Some(path)
     }
@@ -351,6 +345,11 @@ impl eframe::App for MyApp {
                 }
 
                 let dest_dir = &entry.folder;
+                log::debug!(
+                    "Pressed key: {}. Moving image to folder: {}",
+                    letter,
+                    &dest_dir
+                );
                 match self.move_current_image_to_dest(dest_dir) {
                     Ok(move_log) => {
                         let filename = get_file_name(&move_log.src);
@@ -642,5 +641,21 @@ mod tests {
         // Further undo should return None.
         assert!(app.undo_move().is_none());
         assert!(app.undo_move().is_none());
+    }
+
+    #[test]
+    fn remove_current_image_test() {
+        let mut app = MyApp::default();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let src_path = temp_dir.path().join("test.jpg");
+        std::fs::write(&src_path, b"Hello, world!").unwrap();
+        app.image_manager
+            .set_image_folder(&temp_dir.path().to_string_lossy());
+        assert!(app.image_manager.load_current_image().is_some());
+        let Some(path) = app.image_manager.remove_current_image() else {
+            panic!("remove_current_image() returned None");
+        };
+        assert_eq!(path, src_path.to_string_lossy());
+        assert!(app.image_manager.load_current_image().is_none());
     }
 }
