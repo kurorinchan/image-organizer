@@ -2,7 +2,11 @@ use eframe::egui;
 use egui::{FontData, FontDefinitions, FontFamily};
 use rfd::FileDialog;
 use rust_embed::Embed;
-use std::{fs, path::Path, path::PathBuf};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{bail, Result};
 
@@ -24,16 +28,197 @@ struct MoveLogEntry {
     dest: String,
 }
 
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+struct ImagePath {
+    path: String,
+}
+
+impl ImagePath {
+    fn new(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+        }
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn uri(&self) -> String {
+        format!("file://{}", self.path)
+    }
+}
+
+// This contains a list of images that are loaded in egui right now. Anything that is not properly
+// unloaded is memory leak.
+#[derive(Default)]
+struct Loader {
+    image_paths: HashSet<ImagePath>,
+    context: egui::Context,
+}
+
+impl Loader {
+    fn set_context(&mut self, context: &egui::Context) {
+        self.context = context.clone();
+    }
+
+    fn add(&mut self, path: &str) -> egui::Image {
+        let image_path = ImagePath::new(path);
+        if self.image_paths.insert(image_path.clone()) {
+            log::info!(
+                "Added image. Number of Loaded images: {}",
+                self.image_paths.len()
+            );
+        }
+        egui::Image::new(egui::ImageSource::Uri(std::borrow::Cow::from(
+            image_path.uri(),
+        )))
+    }
+
+    fn remove(&mut self, path: &str) {
+        let path = ImagePath::new(path);
+        if self.image_paths.remove(&path) {
+            self.context.forget_image(&path.uri());
+        }
+        log::info!(
+            "Removed image. Number of Loaded images: {}",
+            self.image_paths.len()
+        );
+    }
+
+    fn only_keep(&mut self, paths: Vec<String>) {
+        let new_set: HashSet<ImagePath> =
+            HashSet::from_iter(paths.iter().map(|p| ImagePath::new(p)));
+        let left_over = &self.image_paths - &new_set;
+        if left_over.is_empty() {
+            return;
+        }
+        for path in left_over {
+            log::debug!("OnlyKeep: Removing image: {}", path.path());
+            self.remove(path.path());
+        }
+        for path in &new_set {
+            log::debug!("OnlyKeep: Adding image: {}", path.path());
+            self.add(path.path());
+        }
+    }
+
+    fn uris(&self) -> Vec<String> {
+        self.image_paths.iter().map(|p| p.uri()).collect()
+    }
+
+    fn paths(&self) -> Vec<String> {
+        self.image_paths
+            .iter()
+            .map(|p| p.path().to_string())
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct ImageManager {
+    all_images: Vec<String>,
+    current_image_index: usize,
+    loader: Loader,
+}
+
+struct LoadedImageInfo<'a> {
+    path: String,
+    image: egui::Image<'a>,
+}
+
+impl ImageManager {
+    fn set_context(&mut self, context: &egui::Context) {
+        self.loader.set_context(context);
+    }
+
+    fn set_image_folder(&mut self, folder_path: &str) {
+        self.all_images = get_image_paths(folder_path);
+        self.current_image_index = 0;
+    }
+
+    fn load_current_image(&mut self) -> Option<LoadedImageInfo> {
+        let path = &self.all_images.get(self.current_image_index);
+        match *path {
+            Some(path) => Some(LoadedImageInfo {
+                path: path.clone(),
+                image: self.loader.add(path),
+            }),
+            None => None,
+        }
+    }
+
+    // Only load images within 3 indices of the current image.
+    fn cleanup(&mut self) {
+        let start = std::cmp::max(0, self.current_image_index.saturating_sub(3));
+        let end = std::cmp::min(
+            self.all_images.len(),
+            self.current_image_index.saturating_add(3),
+        );
+        let mut keep_images = Vec::new();
+        for i in start..end {
+            keep_images.push(self.all_images[i].to_string());
+        }
+        self.loader.only_keep(keep_images);
+    }
+
+    fn num_images(&self) -> usize {
+        self.all_images.len()
+    }
+
+    fn current_index(&self) -> usize {
+        self.current_image_index
+    }
+
+    fn next_image(&mut self) {
+        self.current_image_index = (self.current_image_index + 1) % self.num_images();
+    }
+
+    fn previous_image(&mut self) {
+        if self.current_image_index == 0 {
+            self.current_image_index = self.num_images() - 1;
+        } else {
+            self.current_image_index -= 1;
+        }
+    }
+
+    fn remove_current_image(&mut self) -> Option<String> {
+        if self.all_images.len() <= self.current_image_index {
+            log::error!(
+                "Current image index is {} but only has {}.",
+                self.current_image_index,
+                self.all_images.len()
+            );
+            return None;
+        }
+        let path = self.all_images.remove(self.current_image_index);
+        self.loader.remove(&path);
+
+        // Handle the case where the current_image_index is now out of bounds
+        // because it (re)moved the last file.
+        if self.current_image_index >= self.all_images.len() && self.current_image_index > 0 {
+            self.current_image_index = self.all_images.len() - 1;
+        }
+
+        Some(path)
+    }
+
+    fn add_image(&mut self, path: &str) {
+        self.all_images
+            .insert(self.current_image_index, path.to_string());
+        self.loader.add(path);
+    }
+}
+
 #[derive(Default)]
 struct MyApp {
     selected_folder: Option<String>,
-    image_paths: Vec<String>,
-    current_image_index: usize, // Keep track of the currently displayed image
     folder_letter_entries: Vec<FolderLetterEntry>,
     new_folder: String,
     new_letter: String,
     move_log: Vec<MoveLogEntry>,
     status_message: String,
+    image_manager: ImageManager,
 }
 
 fn get_image_paths(folder_path: &str) -> Vec<String> {
@@ -86,25 +271,14 @@ fn move_file(src: &str, dest_dir: &str) -> std::io::Result<String> {
 
 impl MyApp {
     fn move_current_image_to_dest(&mut self, dest_dir: &str) -> Result<MoveLogEntry> {
-        let Some(image_path) = self.image_paths.get(self.current_image_index) else {
-            bail!(
-                "No image path found at the current index {}.",
-                self.current_image_index
-            );
+        let Some(image_path) = self.image_manager.remove_current_image() else {
+            bail!("Failed to find current image");
         };
 
         let image_path = image_path.clone();
         match move_file(&image_path, dest_dir) {
             Ok(new_path) => {
                 log::info!("Moved file {} to {}", image_path, dest_dir);
-                self.image_paths.remove(self.current_image_index);
-                // Handle the case where the current_image_index is now out of
-                // bounds because it (re)moved the last file.
-                if self.current_image_index >= self.image_paths.len()
-                    && self.current_image_index > 0
-                {
-                    self.current_image_index = self.image_paths.len() - 1;
-                }
                 let log_entry = MoveLogEntry {
                     src: image_path.clone(),
                     dest: new_path.clone(),
@@ -120,15 +294,11 @@ impl MyApp {
     }
 
     fn next_image(&mut self) {
-        self.current_image_index = (self.current_image_index + 1) % self.image_paths.len();
+        self.image_manager.next_image();
     }
 
     fn previous_image(&mut self) {
-        if self.current_image_index == 0 {
-            self.current_image_index = self.image_paths.len() - 1;
-        } else {
-            self.current_image_index -= 1;
-        }
+        self.image_manager.previous_image();
     }
 
     fn remove_folder_letter_entries(&mut self, indecies: Vec<usize>) {
@@ -150,14 +320,15 @@ impl MyApp {
         let src = last_move.src;
         let dest = last_move.dest;
         std::fs::rename(&dest, &src).ok()?;
-        self.image_paths
-            .insert(self.current_image_index, src.clone());
+        self.image_manager.add_image(&src);
         Some(src)
     }
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.image_manager.set_context(ctx);
+        self.image_manager.cleanup();
         let mut status_message = String::new();
         ctx.input(|input| {
             if input.key_pressed(egui::Key::J) {
@@ -212,7 +383,7 @@ impl eframe::App for MyApp {
                         if let Some(path) = FileDialog::new().pick_folder() {
                             self.selected_folder = Some(path.to_string_lossy().to_string());
                             if let Some(folder) = &self.selected_folder {
-                                self.image_paths = get_image_paths(folder); // Update image paths
+                                self.image_manager.set_image_folder(folder);
                             }
                         }
                     }
@@ -221,7 +392,7 @@ impl eframe::App for MyApp {
                         Some(folder) => ui.label(folder),
                         None => ui.label("No folder selected."),
                     };
-                    ui.label(format!("({})", self.image_paths.len()));
+                    ui.label(format!("({})", self.image_manager.num_images()));
                 });
 
                 ui.horizontal(|ui| {
@@ -242,21 +413,19 @@ impl eframe::App for MyApp {
                     egui::Vec2::new(ui.available_width(), image_height),
                 );
 
+                // TODO: Tidy this up. It used to be in if let below but was
+                // extracted due to borrow checker.
+                let n_out_of_all = format!(
+                    "({}/{})",
+                    self.image_manager.current_index() + 1,
+                    self.image_manager.num_images(),
+                );
                 // Display the current image:
-                if let Some(path) = self.image_paths.get(self.current_image_index) {
-                    let filename = get_file_name(path);
-                    let n_out_of_all = format!(
-                        "({}/{})",
-                        self.current_image_index + 1,
-                        self.image_paths.len()
-                    );
+                if let Some(image_info) = self.image_manager.load_current_image() {
+                    let filename = get_file_name(&image_info.path);
                     ui.label(format!("Current Image: {} {}", n_out_of_all, filename));
-                    let path = format!("file://{}", path);
-                    ui.add(
-                        egui::Image::new(egui::ImageSource::Uri(std::borrow::Cow::from(path)))
-                            .fit_to_exact_size(image_area.size()),
-                    );
-                } else if !self.image_paths.is_empty() {
+                    ui.add(image_info.image.fit_to_exact_size(image_area.size()));
+                } else if !self.image_manager.num_images() == 0 {
                     ui.label("No images found in the folder.");
                 } else {
                     ui.label("No folder selected.");
@@ -361,30 +530,30 @@ mod tests {
     #[test]
     fn move_file_test() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let src_path = temp_dir.path().join("test.txt");
+        let src_path = temp_dir.path().join("test.jpg");
         let dest_dir = temp_dir.path().join("test_dest");
         fs::create_dir(&dest_dir).unwrap();
         std::fs::write(&src_path, b"Hello, world!").unwrap();
         assert!(src_path.exists());
         move_file(&src_path.to_string_lossy(), &dest_dir.to_string_lossy()).unwrap();
         assert!(!src_path.exists());
-        assert!(dest_dir.join("test.txt").exists());
+        assert!(dest_dir.join("test.jpg").exists());
     }
 
     #[test]
     fn move_current_image_to_dest_test() {
         let mut app = MyApp::default();
         let temp_dir = tempfile::tempdir().unwrap();
-        let src_path = temp_dir.path().join("test.txt");
+        let src_path = temp_dir.path().join("test.jpg");
         let dest_dir = temp_dir.path().join("test_dest");
         fs::create_dir(&dest_dir).unwrap();
         std::fs::write(&src_path, b"Hello, world!").unwrap();
-        app.image_paths = vec![src_path.to_string_lossy().to_string()];
-        app.current_image_index = 0;
+        app.image_manager
+            .set_image_folder(&temp_dir.path().to_string_lossy());
         app.move_current_image_to_dest(&dest_dir.to_string_lossy())
             .unwrap();
         assert!(!src_path.exists());
-        assert!(dest_dir.join("test.txt").exists());
+        assert!(dest_dir.join("test.jpg").exists());
     }
 
     // Given there are mulitple files in the src folder, move the current image to the dest folder.
@@ -392,50 +561,46 @@ mod tests {
     fn multiple_one_file_move_current_image_to_dest_test() {
         let mut app = MyApp::default();
         let temp_dir = tempfile::tempdir().unwrap();
-        let src_path1 = temp_dir.path().join("test1.txt");
-        let src_path2 = temp_dir.path().join("test2.txt");
+        let src_path1 = temp_dir.path().join("test1.jpg");
+        let src_path2 = temp_dir.path().join("test2.jpg");
         let dest_dir = temp_dir.path().join("test_dest");
         fs::create_dir(&dest_dir).unwrap();
         std::fs::write(&src_path1, b"Hello, world!").unwrap();
         std::fs::write(&src_path2, b"Hello, world!").unwrap();
-        app.image_paths = vec![
-            src_path1.to_string_lossy().to_string(),
-            src_path2.to_string_lossy().to_string(),
-        ];
+        app.image_manager
+            .set_image_folder(&temp_dir.path().to_string_lossy());
 
-        // Move the file at the first index. Make sure the second file is not affected.
-        app.current_image_index = 0;
         app.move_current_image_to_dest(&dest_dir.to_string_lossy())
             .unwrap();
-        assert!(!src_path1.exists());
-        assert!(src_path2.exists());
-        assert!(dest_dir.join("test1.txt").exists());
-        assert!(!dest_dir.join("test2.txt").exists());
+
+        // Which file gets moved as a result of move_current_image_to_dest() changes depending on
+        // implementation.
+        assert!(src_path1.exists());
+        assert!(!src_path2.exists());
+        assert!(!dest_dir.join("test1.jpg").exists());
+        assert!(dest_dir.join("test2.jpg").exists());
     }
 
     #[test]
     fn move_all_files_move_current_image_to_dest_test() {
         let mut app = MyApp::default();
         let temp_dir = tempfile::tempdir().unwrap();
-        let src_path1 = temp_dir.path().join("test1.txt");
-        let src_path2 = temp_dir.path().join("test2.txt");
+        let src_path1 = temp_dir.path().join("test1.jpg");
+        let src_path2 = temp_dir.path().join("test2.jpg");
         let dest_dir = temp_dir.path().join("test_dest");
         fs::create_dir(&dest_dir).unwrap();
         std::fs::write(&src_path1, b"Hello, world!").unwrap();
         std::fs::write(&src_path2, b"Hello, world!").unwrap();
-        app.image_paths = vec![
-            src_path1.to_string_lossy().to_string(),
-            src_path2.to_string_lossy().to_string(),
-        ];
-        app.current_image_index = 0;
+        app.image_manager
+            .set_image_folder(&temp_dir.path().to_string_lossy());
         app.move_current_image_to_dest(&dest_dir.to_string_lossy())
             .unwrap();
         app.move_current_image_to_dest(&dest_dir.to_string_lossy())
             .unwrap();
         assert!(!src_path1.exists());
         assert!(!src_path2.exists());
-        assert!(dest_dir.join("test1.txt").exists());
-        assert!(dest_dir.join("test2.txt").exists());
+        assert!(dest_dir.join("test1.jpg").exists());
+        assert!(dest_dir.join("test2.jpg").exists());
     }
 
     #[test]
@@ -462,22 +627,20 @@ mod tests {
     fn undo_move_test() {
         let mut app = MyApp::default();
         let temp_dir = tempfile::tempdir().unwrap();
-        let src_path = temp_dir.path().join("test.txt");
+        let src_path = temp_dir.path().join("test.jpg");
         let dest_dir = temp_dir.path().join("test_dest");
         fs::create_dir(&dest_dir).unwrap();
 
         std::fs::write(&src_path, b"Hello, world!").unwrap();
-        app.image_paths = vec![src_path.to_string_lossy().to_string()];
-        app.current_image_index = 0;
+        app.image_manager
+            .set_image_folder(&temp_dir.path().to_string_lossy());
+
         app.move_current_image_to_dest(&dest_dir.to_string_lossy())
             .unwrap();
 
         // Make sure its not in image paths anymore and has been moved.
-        assert!(!app
-            .image_paths
-            .contains(&src_path.to_string_lossy().to_string()));
         assert!(!src_path.exists());
-        assert!(dest_dir.join("test.txt").exists());
+        assert!(dest_dir.join("test.jpg").exists());
 
         // Now undo and check that everything is rolled back.
         let Some(undo_path) = app.undo_move() else {
@@ -485,10 +648,7 @@ mod tests {
         };
         assert_eq!(undo_path, src_path.to_string_lossy());
         assert!(src_path.exists());
-        assert!(!dest_dir.join("test.txt").exists());
-        assert!(app
-            .image_paths
-            .contains(&src_path.to_string_lossy().to_string()));
+        assert!(!dest_dir.join("test.jpg").exists());
 
         // Further undo should return None.
         assert!(app.undo_move().is_none());

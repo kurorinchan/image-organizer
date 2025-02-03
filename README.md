@@ -23,4 +23,4 @@ where I can press a single key to sort images into folders.
 
 
 # Font License
-The license for the fonts are OFL. A copy of the license is [here](OFL.txt).
+The license for the fonts are OFL. A copy of the license is [here](OFL.jpg).
