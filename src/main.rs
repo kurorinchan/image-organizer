@@ -102,17 +102,6 @@ impl Loader {
             self.add(path.path());
         }
     }
-
-    fn uris(&self) -> Vec<String> {
-        self.image_paths.iter().map(|p| p.uri()).collect()
-    }
-
-    fn paths(&self) -> Vec<String> {
-        self.image_paths
-            .iter()
-            .map(|p| p.path().to_string())
-            .collect()
-    }
 }
 
 #[derive(Default)]
